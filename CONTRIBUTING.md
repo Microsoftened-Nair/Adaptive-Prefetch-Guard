@@ -326,7 +326,7 @@ have missed the notification.
 
 ## Reporting Bugs
 
-Open a [GitHub Issue](https://github.com/USER/apg/issues/new/choose)
+Open a [GitHub Issue](https://github.com/Microsoftened-Nair/Adaptive-Prefetch-Guard/issues/new/choose)
 and use the **Bug Report** template. Key information:
 
 1. **apg version**: `apg --help` doesn't print the version; use
