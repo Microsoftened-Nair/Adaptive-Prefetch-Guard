@@ -1,0 +1,52 @@
+# Build artifacts
+apg
+*.o
+*.obj
+*.exe
+
+# Debug / sanitizer builds
+apg.debug
+apg.asan
+*.asan
+*.ubsan
+
+# Coverage / profiling output
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+
+# Bear compile_commands.json
+compile_commands.json
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+\#*\#
+.\#*
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Evaluation artifacts
+results/
+fio_mmap_test*
+*.log
+
+# Distribution packaging output (when building RPMs/DEBs locally)
+*.rpm
+*.deb
+*.tar.gz
+*.tar.xz
+build/
+deb/DEBIAN/
+
+# Tags files
+tags
+TAGS
+cscope.*
