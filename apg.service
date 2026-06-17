@@ -1,0 +1,54 @@
+# apg.service - systemd unit for Adaptive Prefetch Guard
+#
+# Install:
+#   sudo make install
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now apg
+#
+# Customize the target device by editing ExecStart below, or use a
+# systemd drop-in:
+#   sudo systemctl edit apg
+#   [Service]
+#   ExecStart=
+#   ExecStart=/usr/sbin/apg --device nvme0n1 --syslog --verbose
+
+[Unit]
+Description=Adaptive Prefetch Guard Daemon
+Documentation=man:apg(8)
+After=multi-user.target
+Conflicts=shutdown.target
+Wants=systemd-udevd.service
+
+[Service]
+Type=simple
+# Root is required to write to /sys/block/*/queue/read_ahead_kb.
+User=root
+Group=root
+# Default target device is sda. Override via drop-in or environment file.
+Environment=APG_DEVICE=sda
+EnvironmentFile=-/etc/default/apg
+ExecStart=/usr/sbin/apg --device ${APG_DEVICE} --syslog
+Restart=on-failure
+RestartSec=5
+# Aggressive but bounded resource limits.
+LimitNOFILE=64
+MemoryMax=32M
+CPUQuota=5%
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# PrivateDevices must be false: the daemon needs access to /sys/block and /dev/disk.
+PrivateDevices=false
+# The only writable path is the sysfs read_ahead_kb attribute tree.
+ReadWritePaths=/sys/block
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+
+[Install]
+WantedBy=multi-user.target
