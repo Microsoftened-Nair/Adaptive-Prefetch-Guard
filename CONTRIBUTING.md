@@ -364,7 +364,7 @@ kill -TERM $APG_PID
 If you discover a security vulnerability:
 
 1. **Do not open a public GitHub issue.**
-2. Email the maintainer at `<SECURITY_EMAIL>` with `[apg security]` in
+2. Email the maintainer at `nairmeghraj@gmail.com` with `[apg security]` in
    the subject line.
 3. Include:
    - A description of the vulnerability
