@@ -54,5 +54,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reported vulnerabilities should be emailed to the maintainer (see
   `CONTRIBUTING.md`) before public disclosure.
 
-[Unreleased]: https://github.com/USER/apg/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/USER/apg/releases/tag/v1.0.0
+[Unreleased]: https://github.com/Microsoftened-Nair/Adaptive-Prefetch-Guard/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Microsoftened-Nair/Adaptive-Prefetch-Guard/releases/tag/v1.0.0
