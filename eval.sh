@@ -3,10 +3,12 @@
 #
 # Demonstrates the page-cache thrashing regression caused by oversized block
 # read-ahead on a memory-mapped random-read workload (the RavenDB / RocksDB
-# access pattern from FR-02). Runs `fio` twice against the same on-disk file:
+# access pattern from FR-02). Runs `fio` against the same on-disk file at
+# multiple read-ahead settings:
 #
-#   1. baseline   -- read_ahead_kb = 4096  (problematic kernel default)
-#   2. remediated -- read_ahead_kb = 128   (apg's MIN_RA_KB floor)
+#   1. current   -- whatever the device is set to right now (often 8 MiB)
+#   2. baseline  -- read_ahead_kb = 4096  (problematic kernel default)
+#   3. remediated- read_ahead_kb = 128   (apg's MIN_RA_KB floor)
 #
 # Compares read bandwidth, iowait, and total wall-clock runtime.
 #
@@ -61,7 +63,11 @@ need_kb=$(( need_kb / 1024 * 3 / 2 ))
 
 mkdir -p "$RESULTS_DIR"
 JOB_FILE="$(mktemp --suffix=.fio)"
-trap 'rm -f "$JOB_FILE"; echo 4096 | tee "$SYSFS_RA" >/dev/null' EXIT
+# Capture the device's current read-ahead so the EXIT trap can restore it
+# no matter how the script terminates (Ctrl-C, error, normal exit).
+ORIGINAL_RA=$(cat "$SYSFS_RA" 2>/dev/null || echo 128)
+info "Original read_ahead_kb on $DEVICE_NAME: $ORIGINAL_RA"
+trap 'rm -f "$JOB_FILE"; echo "$ORIGINAL_RA" | tee "$SYSFS_RA" >/dev/null' EXIT
 
 # ---- Generate fio job file ----
 # ioengine=mmap + rw=randread is the canonical thrashing trigger:
@@ -129,41 +135,59 @@ fio --name=prep --filename="$TARGET_DIR/$FIO_FILE_NAME" \
     --iodepth=4 --direct=1 --group_reporting --quiet \
     --exitall=1 || warn "prep failed; fio will allocate on the fly"
 
-# ---- Run baseline (problematic 4 MiB read-ahead) ----
-bold "=== Phase 1: BASELINE (read_ahead_kb=4096) ==="
+# ---- Phase 1: current setting (often worse than the kernel default) ----
+bold "=== Phase 1: CURRENT (read_ahead_kb=$ORIGINAL_RA) ==="
+run_test "current_${ORIGINAL_RA}KB" "$ORIGINAL_RA"
+
+# ---- Phase 2: baseline (problematic 4 MiB kernel default) ----
+bold "=== Phase 2: BASELINE (read_ahead_kb=4096) ==="
 run_test "baseline_4MB" 4096
 
-# ---- Run remediated (apg's MIN_RA_KB floor) ----
-bold "=== Phase 2: REMEDIATED (read_ahead_kb=128) ==="
+# ---- Phase 3: remediated (apg's MIN_RA_KB floor) ----
+bold "=== Phase 3: REMEDIATED (read_ahead_kb=128) ==="
 run_test "remediation_128KB" 128
 
 # ---- Summary table ----
 echo
 bold "=== Summary ==="
-printf '%-22s %-14s %-14s %-14s %-14s\n' \
+printf '%-26s %-14s %-14s %-14s %-14s\n' \
        "label" "ra_kb" "bw_KiBps" "iowait_pct" "wall_s"
-printf '%-22s %-14s %-14s %-14s %-14s\n' \
-       "--------------------" "------------" "------------" \
+printf '%-26s %-14s %-14s %-14s %-14s\n' \
+       "------------------------" "------------" "------------" \
        "------------" "------------"
 
-for label in baseline_4MB remediation_128KB; do
-    f="$RESULTS_DIR/${label}.json"
+# Dynamically discover which phase JSONs exist so the summary table
+# works no matter how many phases ran (1, 2, or 3).
+phase_files=("$RESULTS_DIR"/current_*.json "$RESULTS_DIR/baseline_4MB.json" "$RESULTS_DIR/remediation_128KB.json")
+for f in "${phase_files[@]}"; do
     [[ -f "$f" ]] || continue
+    label=$(basename "$f" .json)
     ra=$(extract_metric "$f" '.apg_label')
     bw=$(extract_metric "$f" '.jobs[0].read.bw')
     iw=$(extract_metric "$f" '.jobs[0].read.iowait')
     wl=$(extract_metric "$f" '.apg_wall_s')
-    printf '%-22s %-14s %-14s %-14s %-14s\n' "$label" "$ra" "$bw" "$iw" "$wl"
+    printf '%-26s %-14s %-14s %-14s %-14s\n' "$label" "$ra" "$bw" "$iw" "$wl"
 done
 
 echo
-info "Raw JSON: $RESULTS_DIR/{baseline_4MB,remediation_128KB}.json"
-info "Sysfs read_ahead_kb has been restored to 4096 by the EXIT trap."
+info "Raw JSON: $RESULTS_DIR/*.json"
+info "Sysfs read_ahead_kb restored to original value ($ORIGINAL_RA) by the EXIT trap."
 
-# ---- Compute speedup ----
+# ---- Compute speedups ----
 b_bw=$(extract_metric "$RESULTS_DIR/baseline_4MB.json"      '.jobs[0].read.bw')
 r_bw=$(extract_metric "$RESULTS_DIR/remediation_128KB.json" '.jobs[0].read.bw')
 if [[ "$b_bw" != "n/a" && "$r_bw" != "n/a" && "$b_bw" -gt 0 ]]; then
     speedup=$(awk -v b="$b_bw" -v r="$r_bw" 'BEGIN {printf "%.2fx", r/b}')
     bold "Throughput speedup (remediation / baseline): $speedup"
 fi
+
+# Speedup vs the original (pre-benchmark) setting, if that phase ran.
+for cur in "$RESULTS_DIR"/current_*.json; do
+    [[ -f "$cur" ]] || continue
+    c_bw=$(extract_metric "$cur" '.jobs[0].read.bw')
+    if [[ "$c_bw" != "n/a" && "$r_bw" != "n/a" && "$c_bw" -gt 0 ]]; then
+        speedup_from_current=$(awk -v c="$c_bw" -v r="$r_bw" 'BEGIN {printf "%.2fx", r/c}')
+        bold "Throughput speedup (remediation / current): $speedup_from_current"
+    fi
+    break
+done
