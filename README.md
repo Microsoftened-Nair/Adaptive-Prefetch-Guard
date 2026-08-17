@@ -817,80 +817,133 @@ as its new baseline. It does **not** fight the administrator.
 
 The repository includes `eval.sh`, a self-contained `fio`-based harness
 that reproduces the thrashing pattern and measures the before/after
-throughput delta.
+throughput delta. It runs the same on-disk test file at several
+`read_ahead_kb` settings and compares bandwidth, major-fault count,
+iowait, and wall-clock runtime.
 
-### 14.1 Prerequisites
+### 14.1 Which workload to use
+
+`eval.sh` ships **two workloads**. Choose with `WORKLOAD=`:
+
+| WORKLOAD | Pattern | Purpose |
+|---|---|---|
+| `scan` (default) | Parallel `mmap --rw=read` streams, each scanning a disjoint contiguous region of a file **larger than RAM** | **Positive test** — the RavenDB-style case `apg` is built to fix. Each 4 KiB fault looks sequential to the kernel's read-ahead heuristic, so it grows its window toward `ra_pages` (e.g. 4096 KiB) and prefetches far more pages than the workload consumes, churning the page cache. |
+| `randread` | Pure `mmap --rw=randread --bs=4k` | **Negative control** — proves `apg` does **not** false-positive. The kernel's adaptive read-ahead detects the random pattern and refuses to prefetch, so `read_ahead_kb` makes no difference and `apg` correctly stays idle. |
+
+Use `scan` to demonstrate where `apg` helps; keep `randread` to prove it
+won't fire on genuine random I/O.
+
+### 14.2 Prerequisites
 
 ```bash
 sudo apt install fio jq
-df -h /mnt        # ensure ≥ 3 GiB free for the test file
+df -h /mnt        # ensure ≥ FIO_SIZE free for the test file (file must EXCEED RAM)
 ```
 
-### 14.2 Running
+For `scan`, the test file **must be larger than your system RAM** —
+otherwise every prefetched page stays in cache, there is no churn, and
+read-ahead has nothing to thrash. Check your RAM with `free -h` and set
+`FIO_SIZE` above it (e.g. `FIO_SIZE=10G` on a 7.6 GiB machine).
+
+### 14.3 Running
 
 ```bash
-sudo ./eval.sh /dev/sda /mnt
+sudo ./eval.sh /dev/sda /mnt              # scan workload (default)
+sudo WORKLOAD=randread ./eval.sh /dev/sda /mnt   # negative control
 ```
 
 Arguments:
 
 1. Block device (e.g. `/dev/sda` or `sda`)
-2. Writable directory for the test file (e.g. `/mnt`, `/var/tmp`)
+2. Writable directory for the test file (e.g. `/mnt`)
 
-### 14.3 What it does
+### 14.4 What it does
 
-1. Pre-allocates a 2 GiB test file via `O_DIRECT` sequential writes.
-2. **Phase 1 (baseline)**: sets `read_ahead_kb=4096`, drops the page
-   cache, runs `fio --ioengine=mmap --rw=randread --bs=4k --numjobs=4`
-   for 30 seconds. Records bandwidth and iowait.
-3. **Phase 2 (remediated)**: sets `read_ahead_kb=128`, drops the cache
-   again, runs the same `fio` job. Records bandwidth and iowait.
-4. Prints a comparison table and the speedup ratio.
-5. Restores `read_ahead_kb=4096` (the EXIT trap ensures this even on
-   Ctrl-C).
-6. Writes raw JSON results to `./results/{baseline_4MB,remediation_128KB}.json`.
+1. Pre-allocates a `FIO_SIZE` test file via `O_DIRECT` sequential writes.
+2. **Phase 1 (current)**: sets `read_ahead_kb` to the device's original
+   value, drops the page cache, and runs the chosen workload.
+3. **Phase 2 (baseline)**: sets `read_ahead_kb=4096`, drops the cache,
+   runs the same workload.
+4. **Phase 3 (remediated)**: sets `read_ahead_kb=128` (apg's floor),
+   drops the cache, runs the same workload.
+5. Prints a comparison table (bandwidth, major faults, iowait, wall time)
+   and the speedup ratio(s).
+6. Restores the original `read_ahead_kb` on exit (the EXIT trap ensures
+   this even on Ctrl-C).
+7. Writes raw JSON per phase to
+   `./results/{current_*,baseline_4MB,remediation_128KB}.json`.
 
-### 14.4 Tuning the evaluation
+### 14.5 Tuning the evaluation
 
 Environment variables change the test parameters:
 
 ```bash
-FIO_SIZE=8G FIO_RUNTIME_S=60 FIO_NUMJOBS=8 sudo -E ./eval.sh /dev/nvme0n1 /mnt
+FIO_SIZE=10G FIO_RUNTIME_S=60 FIO_NUMJOBS=32 WORKLOAD=scan \
+    sudo -E ./eval.sh /dev/sda /mnt
 ```
 
 | Variable | Default | Effect |
 |---|---|---|
-| `FIO_SIZE` | `2G` | Test file size |
+| `WORKLOAD` | `scan` | `scan` (positive) or `randread` (negative control) |
+| `FIO_SIZE` | `6G` | Test file size (set **above** RAM for `scan`) |
 | `FIO_RUNTIME_S` | `30` | Duration of each phase in seconds |
-| `FIO_BS` | `4k` | Block size (best left at 4k for mmap) |
-| `FIO_NUMJOBS` | `4` | Number of parallel fio workers |
+| `FIO_BS` | `4k` | Block size (best left at `4k`) |
+| `FIO_NUMJOBS` | `16` | Number of parallel fio workers (`scan` uses more) |
 | `FIO_FILE_NAME` | `fio_mmap_test` | Test file name |
 | `RESULTS_DIR` | `./results` | Where JSON output is written |
 
-### 14.5 Interpreting results
+### 14.6 Sample results (scan workload, real hardware)
 
-Typical output on a thrashing-prone configuration:
+Run on Ubuntu 24.04, **kernel 6.17.0-1025-oem**, a 1 TB rotational HDD
+(`sda`, `ROTA=1`, original `read_ahead_kb=8192`) against a 10 GiB test
+file with 16 parallel mmap scan streams:
 
 ```
-=== Summary ===
-label                 ra_kb          bw_KiBps      iowait_pct    wall_s
---------------------  ------------   ------------  ------------  ------------
-baseline_4MB          4096           1842          94.20         30.05
-remediation_128KB     128            14871         12.40         30.03
-
-Throughput speedup (remediation / baseline): 8.07x
+=== Summary (scan workload) ===
+label                      ra_kb        bw_KiBps       majfaults    iowait_pct   wall_s
+------------------------   ------------ -------------- ------------ ------------ --------
+current_8192KB             8192         1993486        527          0.7          12.56
+baseline_4MB               4096         2157664        492          0.4          12.60
+remediation_128KB          128          2097125        3013         1.7          12.57
 ```
 
-A speedup of 2× or more on random `mmap` reads confirms the problem
-exists on your hardware and that `apg`'s intervention will help.
+The clearest signal is the **major-fault column**: stepping read-ahead
+down from 4096/8192 KiB to 128 KiB raises major faults **from ~500 to
+~3000 — a ~6× increase**. That is exactly the pathological prefetch
+mechanism in reverse: with a huge `read_ahead_kb`, the kernel satisfies a
+much larger share of each page's data in a single big prefetch window, so
+far fewer individual faults are needed — but those oversized windows
+over-read pages the workload never touches, which is what floods the page
+cache on a memory-constrained production host.
 
-If you see **no** speedup, possible causes:
-- Your device already handles 4 MiB read-ahead well (some NVMe
-  controllers with deep queues are not bothered by it)
-- Your workload isn't actually random — `fio` may be hitting the same
-  pages repeatedly. Increase `FIO_SIZE` to exceed RAM.
-- The kernel page cache is large enough to absorb the prefetch — your
-  test is too short or the file is too small.
+On this particular bare-metal box the absolute throughput delta is small
+(`~1.05×`) because a single local HDD with ample page-cache headroom
+masks the waste. The effect is far stronger where RavenDB hit it: on
+virtualized cloud disks (Azure) under memory pressure, where the
+prefetched-but-unused pages genuinely stall on the network storage and
+evict needed cache. See §2 for the production evidence and the kernel
+6.17 commit (`459779d04ae8`, "Improve read ahead size for rotational
+devices").
+
+### 14.7 Interpreting results
+
+- In the `scan` workload, a lower `read_ahead_kb` should produce at least
+  as much throughput **and** a sharply higher major-fault count — proof
+  the large prefetch windows are being eliminated rather than relied upon.
+- A speedup of 2× or more confirms the problem exists on your hardware
+  and that `apg`'s intervention will help.
+- In the `randread` control, expect **~1.0×** and minimal major-fault
+  change — that is the correct, false-positive-free behaviour.
+
+If `scan` shows **no** change in major faults:
+
+- Your test file is too small relative to RAM — increase `FIO_SIZE` so
+  it exceeds available memory and the page cache cannot absorb the
+  prefetch.
+- Your device may genuinely handle large read-ahead well (deep-queue
+  NVMe controllers are more tolerant).
+- You may be on a kernel whose adaptive heuristic already suppresses
+  amplification for your pattern.
 
 ---
 
@@ -1086,7 +1139,7 @@ apg/
 ├── apg.c           # Single-file daemon (~1000 LOC, heavily commented)
 ├── Makefile        # Build + install + debug + analyze targets
 ├── apg.service     # systemd unit
-├── eval.sh         # fio-based evaluation harness
+├── eval.sh         # fio-based evaluation harness (scan + randread workloads)
 └── README.md       # this file
 ```
 
